@@ -11,12 +11,11 @@ on:
 jobs:
   kali-rdp:
     runs-on: ubuntu-latest
-    # Tailscale के लिए OAuth secrets की ज़रूरत होगी
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. Kali Linux कंटेनर शुरू करें (डेस्कटॉप एनवायरनमेंट के साथ)
+      # 1. Kali Linux कंटेनर शुरू करें
       - name: Start Kali Linux Container
         run: |
           docker run -d --name kali-rdp --restart always \
@@ -24,18 +23,31 @@ jobs:
             kalilinux/kali-rolling \
             tail -f /dev/null
 
-      # 2. कंटेनर के अंदर ज़रूरी पैकेज इंस्टॉल करें
+      # 2. कंटेनर के अंदर ज़रूरी पैकेज इंस्टॉल करें (XFCE, xrdp)
       - name: Install XFCE, xrdp, and dependencies
         run: |
           docker exec kali-rdp bash -c "
             apt-get update &&
             DEBIAN_FRONTEND=noninteractive apt-get install -y \
-              kali-desktop-xfce xorg xrdp xorgxrdp dbus-x11 &&
-            # xrdp को पोर्ट 3390 पर सेट करें
+              kali-desktop-xfce xorg xrdp xorgxrdp dbus-x11 sudo &&
             sed -i 's/port=3389/port=3390/g' /etc/xrdp/xrdp.ini
           "
 
-      # 3. xrdp सर्विस शुरू करें (Docker के अंदर systemctl काम नहीं करता)
+      # 3. Kali यूज़र बनाएं और पासवर्ड सेट करें (यहीं पहले एरर आया था)
+      - name: Create Kali user and set password
+        run: |
+          docker exec kali-rdp bash -c "
+            # Check if user 'kali' exists, if not create it
+            id -u kali &>/dev/null || useradd -m -s /bin/bash kali
+            
+            # Add kali user to sudo group
+            usermod -aG sudo kali
+            
+            # Set password
+            echo 'kali:${{ github.event.inputs.kali_password }}' | chpasswd
+          "
+
+      # 4. xrdp सर्विस शुरू करें
       - name: Start xrdp service
         run: |
           docker exec kali-rdp bash -c "
@@ -43,14 +55,7 @@ jobs:
             service xrdp start
           "
 
-      # 4. Kali यूज़र का पासवर्ड सेट करें
-      - name: Set Kali user password
-        run: |
-          docker exec kali-rdp bash -c "
-            echo 'kali:${{ github.event.inputs.kali_password }}' | chpasswd
-          "
-
-      # 5. Tailscale इंस्टॉल और कनेक्ट करें (कंटेनर के अंदर)
+      # 5. Tailscale इंस्टॉल और कनेक्ट करें
       - name: Install and connect Tailscale
         run: |
           docker exec kali-rdp bash -c "
@@ -64,23 +69,19 @@ jobs:
           echo "=================================================="
           echo "   Kali Linux RDP Session Ready"
           echo "=================================================="
-          echo "  Tailscale IP  : Run 'tailscale ip' inside the container to get it (usually 100.x.x.x)"
-          echo "  RDP Port      : 3390"
-          echo "  Username      : kali"
-          echo "  Password      : ${{ github.event.inputs.kali_password }}"
-          echo "=================================================="
-          # कंटेनर का Tailscale IP निकालें और दिखाएं
           TAILSCALE_IP=$(docker exec kali-rdp tailscale ip -4)
           echo "  Your Kali RDP Address: ${TAILSCALE_IP}:3390"
+          echo "  Username             : kali"
+          echo "  Password             : ${{ github.event.inputs.kali_password }}"
           echo "=================================================="
 
-      # 7. सेशन को चालू रखें
+      # 7. सेशन को 5 घंटे तक चालू रखें
       - name: Keep Session Alive
         run: |
           echo "Session will stay alive for 5 hours (max allowed by GitHub Actions)."
           sleep 18000  # 5 घंटे = 18000 सेकंड
 
-      # 8. क्लीनअप (वैकल्पिक, GitHub Actions खुद कर देता है)
+      # 8. क्लीनअप
       - name: Cleanup
         if: always()
         run: |
