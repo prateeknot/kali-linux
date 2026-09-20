@@ -1,4 +1,4 @@
-name: Kali Linux RDP via Tailscale (Robust)
+name: Kali Linux RDP via Tailscale (Final Robust)
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
           sleep 3
           docker ps -a --filter "name=kali-rdp"
 
-      # ---------- Step 3: Install Packages (with error handling) ----------
+      # ---------- Step 3: Install Basic Packages ----------
       - name: Install XFCE, xrdp, curl, and dependencies
         run: |
           set -e
@@ -39,7 +39,7 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y || { echo 'APT update failed'; exit 1; }
             apt-get install -y --no-install-recommends \
-              kali-desktop-xfce xorg xrdp xorgxrdp dbus-x11 sudo curl wget \
+              kali-desktop-xfce xorg xrdp xorgxrdp dbus-x11 sudo curl wget apt-transport-https ca-certificates \
               || { echo 'Package install failed'; exit 1; }
             echo 'Packages installed successfully.'
           "
@@ -50,36 +50,29 @@ jobs:
       - name: Create Kali user and set password
         run: |
           docker exec kali-rdp bash -c "
-            # Create user if not exists
             if ! id -u kali &>/dev/null; then
               useradd -m -s /bin/bash kali
               echo 'User kali created.'
             else
               echo 'User kali already exists.'
             fi
-            # Add to sudo group
             usermod -aG sudo kali
-            # Set password
             echo 'kali:${{ github.event.inputs.kali_password }}' | chpasswd
             echo 'Password set successfully.'
           "
 
-      # ---------- Step 5: Fix xrdp Configuration (Prevent Black Screen) ----------
+      # ---------- Step 5: Fix xrdp Configuration ----------
       - name: Configure xrdp to prevent black screen
         run: |
           docker exec kali-rdp bash -c "
-            # Change port to 3390
             sed -i 's/port=3389/port=3390/g' /etc/xrdp/xrdp.ini
-            # Add unset lines to startwm.sh to fix black screen
             if ! grep -q 'unset DBUS_SESSION_BUS_ADDRESS' /etc/xrdp/startwm.sh; then
               sed -i '/^if \[ -r \/etc\/profile \]/i unset DBUS_SESSION_BUS_ADDRESS\nunset XDG_RUNTIME_DIR' /etc/xrdp/startwm.sh
               echo 'startwm.sh patched.'
             else
               echo 'startwm.sh already patched.'
             fi
-            # Ensure xfce session starts
             echo 'startxfce4' >> /etc/xrdp/startwm.sh
-            # Set sesman config to use Xorg
             sed -i 's/param=Xorg/param=Xorg/g' /etc/xrdp/sesman.ini
             echo 'xrdp configuration completed.'
           "
@@ -96,18 +89,40 @@ jobs:
           docker exec kali-rdp bash -c "service xrdp status || true"
           docker exec kali-rdp bash -c "ss -tlnp | grep 3390 || true"
 
-      # ---------- Step 7: Install & Connect Tailscale (with retry) ----------
-      - name: Install and connect Tailscale
+      # ---------- Step 7: Manual Tailscale Installation (Docker Fix) ----------
+      - name: Install Tailscale manually in container
         run: |
           set -e
+          echo "===== Adding Tailscale APT repo ====="
           docker exec kali-rdp bash -c "
-            # Install Tailscale using official script
-            curl -fsSL https://tailscale.com/install.sh | sh || { echo 'Tailscale install failed'; exit 1; }
-            echo 'Tailscale installed.'
+            curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+            curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list
+            apt-get update -y
+aled            apt-get install -y tailscale || { echo 'Tailscale apt install failed'; exit 1; }
+            echo 'Tailscale installed successfully.'
           "
-          # Connect to Tailscale with retry
+          echo "Verifying Tailscale binary:"
+          docker exec kali-rdp bash -c "which tailscale; which tailscaled"
+
+      # ---------- Step 8: Start Tailscaled Daemon Manually ----------
+ started      - name: Start tailscaled daemon
+        run: |
+          echo "===== Starting tailscaled daemon in background ====="
+          docker exec kali-rdp bash -c "
+            mkdir -p /var/run/tailscale /var/lib/tailscale
+            nohup tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock > /var/log/tailscaled.log 2>&1 &
+            sleep 5
+            echo 'tailsc.'
+          "
+          echo "===== Checking tailscaled process ====="
+          docker exec kali-rdp bash -c "ps aux | grep tailscaled | grep -v grep || true"
+
+      # ---------- Step 9: Connect to Tailscale ----------
+      - name: Connect to Tailscale
+        run: |
+          echo "===== Connecting to Tailscale ====="
           for i in 1 2 3; do
-            echo "Tailscale connect attempt $i..."
+            echo "Attempt $i..."
             if docker exec kali-rdp tailscale up \
               --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} \
               --hostname kali-rdp-actions \
@@ -120,11 +135,10 @@ jobs:
               sleep 10
             fi
           done
-          # Verify connection
+          echo "===== Tailscale status ====="
           docker exec kali-rdp tailscale status || true
-          docker exec kali-rdp tailscale ip -4 || true
 
-      # ---------- Step 8: Show Connection Details ----------
+      # ---------- Step 10: Show Connection Details ----------
       - name: Show Connection Details
         run: |
           echo "=================================================="
@@ -135,6 +149,7 @@ jobs:
             echo "  Your Kali RDP Address: ${TAILSCALE_IP}:3390"
           else
             echo "  WARNING: Tailscale IP not found. Check logs above."
+            TAILSCALE_IP="NOT_FOUND"
           fi
           echo "  Username             : kali"
           echo "  Password             : ${{ github.event.inputs.kali_password }}"
@@ -143,7 +158,6 @@ jobs:
           echo "Open mstsc and connect to: ${TAILSCALE_IP}:3390"
           echo ""
 
-          # Write to summary
           echo "### Kali Linux RDP Details" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
@@ -152,21 +166,24 @@ jobs:
           echo "| **Username** | \`kali\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Password** | \`${{ github.event.inputs.kali_password }}\` |" >> $GITHUB_STEP_SUMMARY
 
-      # ---------- Step 9: Keep Session Alive (5 hours) ----------
+      # ---------- Step 11: Keep Session Alive (5 hours) ----------
       - name: Keep RDP Session Alive
         run: |
           echo "Session will stay alive for 5 hours (300 minutes)."
           echo "Start time: $(date)"
           for i in $(seq 1 300); do
             sleep 60
-            # Check if container is still running
+            # Check container
             if ! docker ps --filter "name=kali-rdp" --filter "status=running" | grep -q kali-rdp; then
               echo "[WARN] Container stopped at minute $i! Restarting..."
               docker start kali-rdp || true
               sleep 10
               docker exec kali-rdp bash -c "service dbus start; service xrdp start" || true
+              docker exec kali-rdp bash -c "nohup tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock > /var/log/tailscaled.log 2>&1 &" || true
+              sleep 5
+              docker exec kali-rdp tailscale up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname kali-rdp-actions --accept-routes=false --accept-dns=false || true
             fi
-            # Check xrdp service
+            # Check xrdp
             if ! docker exec kali-rdp service xrdp status &>/dev/null; then
               echo "[WARN] xrdp service died at minute $i. Restarting..."
               docker exec kali-rdp service xrdp start || true
@@ -180,7 +197,7 @@ jobs:
           done
           echo "Session time completed."
 
-      # ---------- Step 10: Cleanup ----------
+      # ---------- Step 12: Cleanup ----------
       - name: Cleanup
         if: always()
         run: |
