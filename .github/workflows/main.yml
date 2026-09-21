@@ -49,6 +49,9 @@ jobs:
         run: |
           docker exec kali-rdp bash -c "
             sed -i 's/port=3389/port=3390/g' /etc/xrdp/xrdp.ini
+            if ! grep -q 'unset DBUS_SESSION_BUS_ADDRESS' /etc/xrdp/startwm.sh; then
+              sed -i '/^if \[ -r \/etc\/profile \]/i unset DBUS_SESSION_BUS_ADDRESS\nunset XDG_RUNTIME_DIR' /etc/xrdp/startwm.sh
+            fi
             echo 'startxfce4' >> /etc/xrdp/startwm.sh
           "
 
@@ -79,16 +82,21 @@ jobs:
             sleep 5
           "
 
-      # 9. Tailscale Connect
+      # 9. Tailscale Connect (Secret Clean Logic Added)
       - name: Connect to Tailscale
         env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          if [ -z "$TAILSCALE_AUTH_KEY" ]; then
-            echo "ERROR: TAILSCALE_AUTH_KEY is missing!"
+          # Remove any extra spaces or newlines from the secret
+          CLEAN_KEY=$(echo "$TS_KEY" | tr -d '[:space:]')
+          
+          if [ -z "$CLEAN_KEY" ]; then
+            echo "ERROR: TAILSCALE_AUTH_KEY is missing or empty in this repository!"
+            echo "Please add it in Settings -> Secrets and variables -> Actions."
             exit 1
           fi
-          docker exec kali-rdp tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="kali-rdp-actions" --accept-routes=false --accept-dns=false
+          
+          docker exec kali-rdp tailscale up --authkey="$CLEAN_KEY" --hostname="kali-rdp-actions" --accept-routes=false --accept-dns=false
 
       # 10. Show Connection Details
       - name: Show Connection Details
